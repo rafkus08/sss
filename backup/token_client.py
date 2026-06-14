@@ -7,7 +7,7 @@ import hmac
 from config import DEVICE_KEYS
 
 
-def _open_serial(port: str):
+def open_serial(port: str):
     ser = serial.Serial(port, 115200, timeout=1, dsrdtr=False, rtscts=False)
     ser.setDTR(False)
     time.sleep(2)
@@ -36,20 +36,23 @@ def detect_active_tokens() -> list[str]:
     return active_tokens
 
 
-def identify(port) -> str:
-    ser = _open_serial(port)
+def identify(port, ser=None) -> str:
+    is_external_ser = ser is not None
+    active_ser = ser if is_external_ser else open_serial(port)
+
     try:
-        ser.write(b'IDENTIFY\r\n')
-        port_id = ser.readline().decode().strip()
+        active_ser.write(b'IDENTIFY\r\n')
+        port_id = active_ser.readline().decode().strip()
         if not port_id:
             raise ConnectionError(f'Port "{port}" is empty')
         return port_id
     finally:
-        ser.close()
+        if not is_external_ser:
+            active_ser.close()
 
 
-def store_share(mc_port: str, x_index: int, system_id_hex: str, share_hex: str) -> bool:
-    ser = _open_serial(mc_port)
+def store_share(mc_port: str, x_index: int, system_id_hex: str, share_hex: str, unlock_share_hex: str, unlock_hash_hex: str) -> bool:
+    ser = open_serial(mc_port)
     ser.write(b"STORE\r\n")
     time.sleep(0.05)
     ser.write(str(x_index).encode() + b"\r\n")
@@ -57,12 +60,16 @@ def store_share(mc_port: str, x_index: int, system_id_hex: str, share_hex: str) 
     ser.write(system_id_hex.encode() + b"\r\n")
     time.sleep(0.05)
     ser.write(share_hex.encode() + b"\r\n")
+    time.sleep(0.05)
+    ser.write(unlock_share_hex.encode() + b"\r\n")
+    time.sleep(0.05)
+    ser.write(unlock_hash_hex.encode() + b"\r\n")
     response = ser.readline().decode().strip()
     ser.close()
     return response == "OK"
 
 
-def auth_token(ser, key_device: bytes) -> bool:
+def auth_token(ser, key_device: bytes) -> str:
     ser.write(b"AUTH\r\n")
     start = time.time()
     while True:
@@ -78,18 +85,26 @@ def auth_token(ser, key_device: bytes) -> bool:
     nonce_bytes = bytes.fromhex(nonce)
     hmac_bytes = hmac.new(key_device, nonce_bytes, hashlib.sha256).digest()
     ser.write(hmac_bytes.hex().encode() + b"\r\n")
+    unlock_share = ser.readline().decode().strip()
+    if "-" not in unlock_share or len(unlock_share.split("-", 1)[1]) != 64:
+        raise Exception(f'Invalid unlock share format')
+    return unlock_share
+
+
+def get_unlock_share(ser):
+    unlock_share = ser.readline().decode().strip()
+    return unlock_share
+
+
+def send_unlock_key(ser, unlock_key_hex: str):
+    ser.write(unlock_key_hex.encode() + b"\r\n")
     response = ser.readline().decode().strip()
     return response == "AUTH_OK"
 
 
-def get_share(mc_port: str, key_device: bytes) -> dict[str, Any]:
-    ser = _open_serial(mc_port)
-    if not auth_token(ser, key_device):
-        ser.close()
-        raise RuntimeError("Authentication failed")
+def get_share(ser) -> dict[str, Any]:
     ser.write(b"GET_SHARE\r\n")
     share = ser.readline().decode().strip()
-    ser.close()
     if "-" not in share:
         raise RuntimeError(f"Invalid share format: {share}")
     parts = share.split("-", 2)
