@@ -208,12 +208,52 @@ Niniejszy system jest aplikacją konsolową (CLI). Do jego poprawnego działania
     ```
 3.  **Konfiguracja:** Upewnij się, że w pliku `config.py` znajdują się poprawne klucze urządzeń (`DEVICE_KEYS`) przypisane do identyfikatorów Twoich tokenów. (Tokeny które oddałem mają aktualną wersje oprogramowania oraz poprawne klucze)
 4. **Tworzenie nowych tokenów:** By stworzyć funkcjonalny token, należy wgrać micropython'a na RP2350 w trybie BOOTSEL, a następnie zapisać plik `main.py` z folderu `micropy` na pen'ie. W zapisanym pliku należy zmienić zmienną `K_DEVICE` na wybrany ciąg 64 znaków hex zapisanych w bajtach oraz `DEVICE_ID` na wybrany identyfikator. Aby program rozpoznał token, trzeba dodać parę `DEVICE_ID`: `K_DEVICE` do zmiennej w pliku `config.py` w folderze `backup`.
+Here's a ready-to-copy section in Polish for explaining system dependencies installation in the `dokumentacja.md` file. You can insert this after section 6.1 (before "Instalacja zależności"):
 
-## 6.2. Procedura szyfrowania (Backup)
-Aby zabezpieczyć plik, należy uruchomić program z parametrem `encrypt`:
-```bash
-python main.py encrypt <ścieżka_do_pliku>
+## 6.1.1. Instalacja zależności systemowych
+
+Poza zależnościami python'a, system wymaga zainstalowania dodatkowych narzędzi systemowych, aby prawidłowo funkcjonować:
+
+### Wymagania systemowe
+
+1. **Windows Subsystem for Linux (WSL)** - wymagany do uruchomienia narzędzi SSS
+   - WSL musi być zainstalowany i skonfigurowany w systemie Windows
+   - Program używa WSL do uruchomienia poleceń `ssss-split` i `ssss-combine`
+
+2. **SSSS (Shamir's Secret Sharing Scheme)** - narzędzie do dzielenia i rekonstrukcji sekretów
+   - Musi być zainstalowane wewnątrz WSL
+   - Jest wymagane do operacji podziału i łączenia kluczy
+
+### Instrukcja instalacji
+
+#### Krok 1: Instalacja WSL (jeśli nie zainstalowany)
+Otwórz PowerShell jako Administrator i uruchom:
+```powershell
+wsl --install
 ```
+
+Po instalacji uruchom WSL i zaktualizuj system:
+```bash
+sudo apt update
+sudo apt upgrade -y
+```
+
+#### Krok 2: Instalacja SSSS w WSL
+Wewnątrz WSL uruchom:
+```bash
+sudo apt install ssss -y
+```
+
+Aby sprawdzić, czy instalacja się powiodła:
+```bash
+ssss-split --help
+ssss-combine --help
+```
+
+Jeśli używasz systemu linux program zadziała bez WSL, wystarczy zainstalować `ssss` i w pliku `sss.py` usunąć `"wsl", ` z funkcji `subprocess.Popen` w obydwu funkcjach.
+
+---
+
 **Przebieg procesu:**
 1.  Przed uruchomieniem programu podłącz tokeny do komputera. 
 2.  Dla każdego z 3 pierwszych tokenów system wykonuje autoryzację i zapisuje udział w kluczu głównym oraz klucz odblokowujący.
