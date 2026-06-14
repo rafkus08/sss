@@ -6,10 +6,11 @@ import os
 from cryptolib import aes
 
 BLOCK_SIZE = 64
-K_DEVICE = bytes.fromhex("d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00112233")
-DEVICE_ID = "003"
+K_DEVICE = bytes.fromhex("8f3c2a9d4e7b6c1f0a2233445566778899aabbccddeeff001122334455667788")
+DEVICE_ID = "001"
 authorized = False
 current_nonce = None
+stored_unlock_hash = None
 
 def aes_ctr_crypt(key: bytes, data: bytes, nonce: bytes) -> bytes:
     cipher = aes(key, 1)  # ECB mode
@@ -54,13 +55,15 @@ def read_line():
         return sys.stdin.readline().strip()
     return None
 
-def store_share(x_index, system_id_hex, share_hex):
+def store_share(x_index, system_id_hex, share_hex, unlock_share_hex, unlock_hash_hex):
     version = 1
 
     x_index = int(x_index)
 
     system_id = bytes.fromhex(system_id_hex)
     share = bytes.fromhex(share_hex)
+    unlock_share = bytes.fromhex(unlock_share_hex)
+    unlock_hash = bytes.fromhex(unlock_hash_hex)
 
     if len(share) != 32:
         send("INVALID_SHARE_LENGTH")
@@ -69,12 +72,25 @@ def store_share(x_index, system_id_hex, share_hex):
     if len(system_id) != 16:
         send("INVALID_ID_LENGTH")
         return
+
+    if len(unlock_share) != 32:
+        send("INVALID_UNLOCK_SHARE_LENGTH")
+        return
     
+    if len(unlock_hash) != 32:
+        send("INVALID_UNLOCK_HASH_LENGTH")
+        return
+
     nonce = os.urandom(16)
-    ciphertext = aes_ctr_crypt(K_DEVICE, share, nonce)
-    mac = hmac_sha256(K_DEVICE, nonce + ciphertext)
+    plaintext = share + unlock_share + unlock_hash
+    all_encrypted = aes_ctr_crypt(K_DEVICE, plaintext, nonce)
+    ciphertext = all_encrypted[0:32]
+    encrypted_unlock_share = all_encrypted[32:64]
+    encrypted_unlock_hash = all_encrypted[64:96]
     
-    data = bytearray(1 + 1 + 2 + 16 + 16 + 32 + 32)  # version + index + reserved + system_id + nonce + ciphertext + mac
+    mac = hmac_sha256(K_DEVICE, nonce + bytes([version]) + bytes([x_index]) + system_id + ciphertext + encrypted_unlock_share + encrypted_unlock_hash)
+    
+    data = bytearray(164)
 
     data[0] = version
     data[1] = x_index
@@ -85,16 +101,18 @@ def store_share(x_index, system_id_hex, share_hex):
     data[20:36] = nonce
     data[36:68] = ciphertext
     data[68:100] = mac
+    data[100:132] = encrypted_unlock_share
+    data[132:164] = encrypted_unlock_hash
 
     with open("share.bin", "wb") as f:
         f.write(data)
 
-def load_share():
+def read_container():
     try:
         with open("share.bin", "rb") as f:
             data = f.read()
 
-        if len(data) != 100:
+        if len(data) != 164:
             return None
 
         version = data[0]
@@ -104,24 +122,76 @@ def load_share():
         nonce = data[20:36]
         ciphertext = data[36:68]
         mac_stored = data[68:100]
+        encrypted_unlock_share = data[100:132]
+        encrypted_unlock_hash = data[132:164]
 
-        mac_calc = hmac_sha256(K_DEVICE, nonce + ciphertext)
+        mac_calc = hmac_sha256(K_DEVICE, nonce + bytes([version]) + bytes([x_index]) + system_id + ciphertext + encrypted_unlock_share + encrypted_unlock_hash)
 
         if mac_calc != mac_stored:
             send("MAC_FAIL")
             return None
-
-        share = aes_ctr_crypt(K_DEVICE, ciphertext, nonce)
-
+        
         return {
             "version": version,
             "x_index": x_index,
             "system_id": system_id.hex(),
-            "share": share.hex()
+            "nonce": nonce,
+            "ciphertext": ciphertext,
+            "encrypted_unlock_share": encrypted_unlock_share,
+            "encrypted_unlock_hash": encrypted_unlock_hash
         }
-
-    except:
+    except Exception:
         return None
+
+    
+def load_share():
+    container = read_container()
+    if not container:
+        return None
+    
+    combined_encrypted = (container["ciphertext"] + 
+                          container["encrypted_unlock_share"] + 
+                          container["encrypted_unlock_hash"])
+    
+    decrypted_all = aes_ctr_crypt(K_DEVICE, combined_encrypted, container["nonce"])
+    
+    share = decrypted_all[0:32]
+    
+    return {
+        "version": container["version"],
+        "x_index": container["x_index"],
+        "system_id": container["system_id"],
+        "share": share.hex()
+    }
+
+
+def load_unlock_share():
+    container = read_container()
+    if not container:
+        return None
+    
+    combined_encrypted = (container["ciphertext"] + 
+                          container["encrypted_unlock_share"] + 
+                          container["encrypted_unlock_hash"])
+    
+    decrypted_all = aes_ctr_crypt(K_DEVICE, combined_encrypted, container["nonce"])
+    
+    unlock_share = decrypted_all[32:64]
+    unlock_hash = decrypted_all[64:96]
+    
+    x_index = container["x_index"]
+    global stored_unlock_hash
+    stored_unlock_hash = unlock_hash
+    
+    return f"{x_index}-{unlock_share.hex()}"
+
+    
+def verify_unlock(unlock_hex):
+    unlock = bytes.fromhex(unlock_hex)
+    calculated_hash = hashlib.sha256(unlock).digest()
+    
+    return calculated_hash == stored_unlock_hash
+        
 
 send("TOKEN_READY")
 
@@ -141,7 +211,7 @@ while True:
 
         elif line == "STORE":
             state = "STORE_X"
-
+            
         elif line == "GET_SHARE":
             if authorized:
                 data = load_share()
@@ -171,7 +241,15 @@ while True:
 
     elif state == "STORE_SHARE":
         share_hex = line
-        store_share(x_index, system_id, share_hex)
+        state = "STORE_UNLOCK_SHARE"
+        
+    elif state == "STORE_UNLOCK_SHARE":
+        unlock_share_hex = line
+        state = "STORE_UNLOCK_HASH"
+    
+    elif state == "STORE_UNLOCK_HASH":
+        unlock_hash_hex = line
+        store_share(x_index, system_id, share_hex, unlock_share_hex, unlock_hash_hex)
         send("OK")
         state = "IDLE"
     
@@ -180,11 +258,18 @@ while True:
         expected = hmac_sha256(K_DEVICE, current_nonce)
         
         if response == expected:
+            unlock_share = load_unlock_share()
+            send(unlock_share)
+            state = "UNLOCK_WAIT"
+        else:
+            send("AUTH_FAIL")
+            state = "IDLE"
+
+    elif state == "UNLOCK_WAIT":
+        unlock_hex = line
+        if verify_unlock(unlock_hex):
             authorized = True
             send("AUTH_OK")
         else:
             send("AUTH_FAIL")
-            
         state = "IDLE"
-
-
